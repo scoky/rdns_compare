@@ -56,17 +56,18 @@ class Recursive(object):
             
             tail = [v for v in self.clean_cache if v > self.clean_cache_mean + self.clean_cache_sd]
             if len(tail) > 0:
-                self.clean_cache_tail_mean = numpy.mean(tail)
+                self.clean_cache_tail_sd = numpy.mean(tail)
             else:
-                self.clean_cache_tail_mean = float('inf')
+                self.clean_cache_tail_sd = float('inf')
                 
             tail = [v for v in self.clean_cache if v > self.clean_cache_median + self.clean_cache_md]
             if len(tail) > 0:
-                self.clean_cache_tail_median = numpy.median(tail)
+                self.clean_cache_tail_md = numpy.mean(tail)
             else:
-                self.clean_cache_tail_median = float('inf')
+                self.clean_cache_tail_md = float('inf')
         else:
-            self.clean_cache_median = self.clean_cache_mean = self.clean_cache_sd = self.clean_cache_md = float('inf')
+            self.clean_cache_median = self.clean_cache_mean = self.clean_cache_sd = self.clean_cache_md = \
+                self.clean_cache_tail_sd = self.clean_cache_tail_md = float('inf')
 
         if (self.prewarm_cache) > 0:
             self.prewarm_cache_median = numpy.median(self.prewarm_cache)
@@ -76,17 +77,18 @@ class Recursive(object):
             
             tail = [v for v in self.prewarm_cache if v > self.prewarm_cache_mean + self.prewarm_cache_sd]
             if len(tail) > 0:
-                self.prewarm_cache_tail_mean = numpy.mean(tail)
+                self.prewarm_cache_tail_sd = numpy.mean(tail)
             else:
-                self.prewarm_cache_tail_mean = float('inf')
+                self.prewarm_cache_tail_sd = float('inf')
                 
             tail = [v for v in self.prewarm_cache if v > self.prewarm_cache_median + self.prewarm_cache_md]
             if len(tail) > 0:
-                self.prewarm_cache_tail_median = numpy.median(tail)
+                self.prewarm_cache_tail_md = numpy.mean(tail)
             else:
-                self.prearm_cache_tail_median = float('inf')
+                self.prearm_cache_tail_md = float('inf')
         else:
-            self.prewarm_cache_median = self.prewarm_cache_mean = self.prewarm_cache_sd = self.prewarm_cache_md = float('inf')
+            self.prewarm_cache_median = self.prewarm_cache_mean = self.prewarm_cache_sd = \
+                self.prewarm_cache_md = self.prewarm_cache_tail_sd = self.prewarm_cache_tail_md = float('inf')
 
     def resp_sanity_1(self, dgram, data, rtime):
         csv,answers = data
@@ -109,7 +111,7 @@ class Recursive(object):
         # See if we actually got an answer
         self.rcodes[dgram.header.rcode] += 1
         # If got an answer, keep track of time
-        if dgram.header.rcode == dl.RCODE.NOERROR and len(dgram.rr) > 0:
+        if dgram.header.rcode == dl.RCODE.NOERROR:
             self.clean_cache.append(rtime)
         # Send follow up query
         query = dl.DNSRecord.question(dgram.q.qname)
@@ -259,7 +261,7 @@ class Input(object):
                 service.recursives.append(Recursive(value, service))
             self.recursives.append(service)
 
-def main(bind, source, output, csv):
+def main(bind, source, output, csv, progress):
     """ 
         Run the tests.
         There are three stages:
@@ -278,7 +280,10 @@ def main(bind, source, output, csv):
     probe.run()
 
     # Test each of the sanity hostnames
-    for sanity in source.sanity:
+    for i,sanity in enumerate(source.sanity):
+        if progress:
+            output.write('\rrunning sanity checks... ( {0} / {1} )'.format(i+1, len(source.sanity)))
+            output.flush()
         for service in source.recursives:
             for recursive in service.recursives:
                 query = dl.DNSRecord.question(sanity.hostname)
@@ -289,7 +294,10 @@ def main(bind, source, output, csv):
     time.sleep(1)
     # Send queries for each of the popular hostnames
     # A response to any of these queries will invoke a follow-up query
-    for popular in source.popular:
+    for i,popular in enumerate(source.popular):
+        if progress:
+            output.write('\rrunning performance tests... ( {0} / {1} )'.format(i+1, len(source.popular)))
+            output.flush()
         for service in source.recursives:
             for recursive in service.recursives:
                 query = dl.DNSRecord.question(popular)
@@ -300,6 +308,9 @@ def main(bind, source, output, csv):
     time.sleep(2)
     
     probe.close()
+    if progress:
+        output.write('\r')
+        output.flush()
 
     # Compute stats
     rdns = []
@@ -321,10 +332,10 @@ def main(bind, source, output, csv):
     lengths = [len(lines[0][i]) for i in range(len(lines[0]))]
 
     typical = sorted(rdns, key = lambda r: r.clean_cache_median)
-    tail = sorted(rdns, key = lambda r: r.clean_cache_tail_mean)[0]
+    tail = sorted(rdns, key = lambda r: r.clean_cache_tail_md)[0]
     shortest = sorted(rdns, key = lambda r: r.min_time)[0]
     prewarm = sorted(rdns, key = lambda r: r.prewarm_cache_median)[0]
-    for r in sorted(rdns, key = lambda r: r.clean_cache_median):
+    for r in typical:
         postfix = []
         if r == typical[0]:
             postfix.append('best typical performance')
@@ -341,7 +352,7 @@ def main(bind, source, output, csv):
 
         line = [r.address, r.service.name]
         line.extend(map(lambda v: format(v, '.3f'), [r.clean_cache_mean, r.clean_cache_median, r.clean_cache_sd, \
-            r.clean_cache_md, r.clean_cache_tail_median, r.prewarm_cache_median, r.min_time]))
+            r.clean_cache_md, r.clean_cache_tail_md, r.prewarm_cache_median, r.min_time]))
         line.append(postfix)
         lines.append(line)
         lengths = [max(lengths[i], len(line[i])) for i in range(len(lengths))]
@@ -359,7 +370,8 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--popular', default=None, help='override url for the popular list of hostnames')
     parser.add_argument('-r', '--recursives', default=None, help='override url for the list of recursive dns servers')
     parser.add_argument('-a', '--additional', nargs='+', default=[], help='IP addresses of additional recursive resolvers')
-    parser.add_argument('-i', '--inuse', action='store_true', default=False, help='Include the system configured recursive resolver')
+    parser.add_argument('-i', '--inuse', action='store_true', default=False, help='include the system configured recursive resolver')
+    parser.add_argument('--progress', action='store_true', default=False, help='report progress updates')
     args = parser.parse_args()
 
     hostname,port = args.bind.split(':')
@@ -371,11 +383,11 @@ if __name__ == "__main__":
         service.recursives.append(Recursive(additional, service))
         source.recursives.append(service)
     if args.inuse:
-        service = Service('configured')
+        service = Service('inuse')
         for nameserver in dns.resolver.get_default_resolver().nameservers:
             service.recursives.append(Recursive(nameserver, service))
         source.recursives.append(service)
     source.popular = source.popular[:args.names]
 
-    main(bind, source, args.output, args.csv)
+    main(bind, source, args.output, args.csv, args.progress)
 
