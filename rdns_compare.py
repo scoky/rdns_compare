@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import numpy
+import select
 import socket
 import urllib2
 import argparse
@@ -130,14 +131,56 @@ class Recursive(object):
 
 class Probe(object):
     def __init__(self, bind):
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self._sock.settimeout(1)
-        self._sock.bind(bind)
+        self._socks = []
+        self._ipv6_sock = None
+        if socket.has_ipv6 and self.is_valid_ipv6_address(bind[0]):
+            try:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                sock.settimeout(1)
+                sock.bind(bind)
+                self._ipv6_sock = sock
+                self._socks.append(sock)
+            except (AttributeError, socket.error):
+                print >>sys.stderr, 'failed creating an IPv6 socket'
+        self._ipv4_sock = None
+        if self.is_valid_ipv4_address(bind[0]):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.settimeout(1)
+            sock.bind(bind)
+            self._ipv4_sock = sock
+            self._socks.append(sock)
+        if len(self._socks) == 0:
+            raise Exception('No sockets available to listen upon!')
+
         self._thread = threading.Thread(target = self._run)
         self._thread.daemon = True
         self._lock = threading.Lock()
         self._callbacks = {}
         self._running = False
+        
+    def is_valid_ipv4_address(self, address):
+        if address == '':
+            return True
+        try:
+            socket.inet_pton(socket.AF_INET, address)
+        except AttributeError:  # no inet_pton
+            try:
+                socket.inet_aton(address)
+            except socket.error:
+                return False
+            return True
+        except socket.error:
+            return False
+        return True
+
+    def is_valid_ipv6_address(self, address):
+        if address == '':
+            return True
+        try:
+            socket.inet_pton(socket.AF_INET6, address)
+        except socket.error:
+            return False
+        return True
 
     def run(self):
         """ Begin listening on the socket for incoming datagrams """
@@ -147,14 +190,19 @@ class Probe(object):
         self._running = True
         while self._running:
             try:
-                dgram, addr = self._sock.recvfrom(4096)
-                dgram = dl.DNSRecord.parse(dgram)
-                etime = time.time()
-                
-                key = self._key(dgram, addr)
-                with self._lock:
-                    callback, data, stime = self._callbacks[key]
-                callback(dgram, data, etime - stime)
+                read, _, _ = select.select(self._socks, [], [], 1)
+                for sock in read:
+                    dgram, addr = sock.recvfrom(4096)
+                    dgram = dl.DNSRecord.parse(dgram)
+                    etime = time.time()
+                    # IPv6 will return additional details not needed for lookup
+                    addr = (addr[0], addr[1])
+                    
+                    key = self._key(dgram, addr)
+                    with self._lock:
+                        callback, data, stime = self._callbacks[key]
+                        del self._callbacks[key]
+                    callback(dgram, data, etime - stime)
             except socket.timeout:
                 pass
             except (KeyboardInterrupt, SystemExit):
@@ -169,14 +217,18 @@ class Probe(object):
     def close(self):
         if self._running:
             self._running = False
-            self._sock.close()
+            for sock in self._socks:
+                sock.close()
             self._thread.join()
 
     def send(self, dgram, addr, callback, data):
         key = self._key(dgram, addr)
         with self._lock:
             self._callbacks[key] = (callback, data, time.time())
-        self._sock.sendto(dgram.pack(), addr)
+        if self._ipv4_sock and self.is_valid_ipv4_address(addr[0]):
+            self._ipv4_sock.sendto(dgram.pack(), addr)
+        elif self._ipv6_sock and self.is_valid_ipv6_address(addr[0]):
+            self._ipv6_sock.sendto(dgram.pack(), addr)
 
 class Input(object):
     Sanity = namedtuple('Sanity', ['hostname', 'addresses'])
@@ -232,7 +284,7 @@ def main(bind, source, output, csv):
                 query = dl.DNSRecord.question(sanity.hostname)
                 probe.send(query, (recursive.address, 53), recursive.resp_sanity_1, (csv, sanity.addresses))
                 recursive.incQueries()
-                time.sleep(0.001)
+                time.sleep(0.01)
         time.sleep(0.1)
     time.sleep(1)
     # Send queries for each of the popular hostnames
@@ -243,9 +295,9 @@ def main(bind, source, output, csv):
                 query = dl.DNSRecord.question(popular)
                 probe.send(query, (recursive.address, 53), recursive.resp_popular_1, (csv, probe))
                 recursive.incQueries()
-                time.sleep(0.001)
+                time.sleep(0.01)
         time.sleep(0.1)
-    time.sleep(1)
+    time.sleep(2)
     
     probe.close()
 
@@ -289,13 +341,13 @@ def main(bind, source, output, csv):
 
         line = [r.address, r.service.name]
         line.extend(map(lambda v: format(v, '.3f'), [r.clean_cache_mean, r.clean_cache_median, r.clean_cache_sd, \
-            r.clean_cache_md, r.clean_cache_tail_mean, r.prewarm_cache_median, r.min_time]))
+            r.clean_cache_md, r.clean_cache_tail_median, r.prewarm_cache_median, r.min_time]))
         line.append(postfix)
         lines.append(line)
         lengths = [max(lengths[i], len(line[i])) for i in range(len(lengths))]
         
     for line in lines:
-        print >>output, ' '.join(['{:<{width}}'.format(v, width = w) for v,w in zip(line,lengths)]).rstrip()
+        print >>output, '  '.join(['{:<{width}}'.format(v, width = w) for v,w in zip(line,lengths)]).rstrip()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description='Compare resolution performance of RDNS')
