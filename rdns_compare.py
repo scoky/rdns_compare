@@ -33,9 +33,11 @@ class Recursive(object):
     @property
     def responses(self):
         return sum(self.rcodes.itervalues())
-    
+
     @property
     def queries(self):
+        """ Thread safe way of counting the number of queries sent:
+            just keep track of the ones sent per thread separately. """
         return self._int_queries + self._ext_queries
 
     def incQueries(self):
@@ -48,6 +50,7 @@ class Recursive(object):
                 '|'.join([str(r.rdata) for r in dgram.rr]))
 
     def compute(self):
+        """ Compute statistics from all of the timing data collected """
         if len(self.clean_cache) > 0:
             self.clean_cache_median = numpy.median(self.clean_cache)
             self.clean_cache_mean = numpy.mean(self.clean_cache)
@@ -69,7 +72,7 @@ class Recursive(object):
             self.clean_cache_median = self.clean_cache_mean = self.clean_cache_sd = self.clean_cache_md = \
                 self.clean_cache_tail_sd = self.clean_cache_tail_md = float('inf')
 
-        if (self.prewarm_cache) > 0:
+        if len(self.prewarm_cache) > 0:
             self.prewarm_cache_median = numpy.median(self.prewarm_cache)
             self.prewarm_cache_mean = numpy.mean(self.prewarm_cache)
             self.prewarm_cache_sd = numpy.std(self.prewarm_cache)
@@ -180,7 +183,7 @@ class Probe(object):
             return True
         try:
             socket.inet_pton(socket.AF_INET6, address)
-        except socket.error:
+        except socket.error, AttributeError:
             return False
         return True
 
@@ -227,10 +230,16 @@ class Probe(object):
         key = self._key(dgram, addr)
         with self._lock:
             self._callbacks[key] = (callback, data, time.time())
-        if self._ipv4_sock and self.is_valid_ipv4_address(addr[0]):
-            self._ipv4_sock.sendto(dgram.pack(), addr)
-        elif self._ipv6_sock and self.is_valid_ipv6_address(addr[0]):
-            self._ipv6_sock.sendto(dgram.pack(), addr)
+        try:
+            if self._ipv4_sock and self.is_valid_ipv4_address(addr[0]):
+                self._ipv4_sock.sendto(dgram.pack(), addr)
+            elif self._ipv6_sock and self.is_valid_ipv6_address(addr[0]):
+                self._ipv6_sock.sendto(dgram.pack(), addr)
+        except socker.error:
+            # This can happen for reasons including:
+            # The interface supports IPv6 but doesn't actually have any routes
+            # The socket has been closed already. Could lock, but probably not worth putting a socket call in lock
+            pass
 
 class Input(object):
     Sanity = namedtuple('Sanity', ['hostname', 'addresses'])
@@ -246,20 +255,27 @@ class Input(object):
         if not recursives:
             recursives = Input.RECURSIVES_DEFAULT_URL
 
-        self.popular = map(str.strip, urllib2.urlopen(popular).readlines())
+        self.popular = list(self.filter_comments(urllib2.urlopen(popular)))
 
         self.sanity = []
-        for line in urllib2.urlopen(sanity).readlines():
-            values = line.strip().split(',')
+        for line in self.filter_comments(urllib2.urlopen(sanity)):
+            values = line.split(',')
             self.sanity.append(Input.Sanity(hostname = values[0], addresses = tuple(values[1:])))
 
         self.recursives = []
-        for line in urllib2.urlopen(recursives).readlines():
-            values = line.strip().split(',')
+        for line in self.filter_comments(urllib2.urlopen(recursives)):
+            values = line.split(',')
             service = Service(values[0])
             for value in values[1:]:
                 service.recursives.append(Recursive(value, service))
             self.recursives.append(service)
+            
+    def filter_comments(self, src):
+        for line in src:
+            line = line.strip()
+            if line == '' or line.strip().startswith('#'):
+                continue
+            yield line
 
 def main(bind, source, output, csv, progress):
     """ 

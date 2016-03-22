@@ -1,3 +1,9 @@
+# List of hostnames and the correct IPv4 address for each.
+# Primary purpose of this file is to make sure that a resolver
+# is acting sanely giving correct answers.
+# TODO: expand to include IPv6
+# TODO: include more hostnames that just the roots
+
 a.root-servers.net,198.41.0.4
 b.root-servers.net,192.228.79.201
 c.root-servers.net,192.33.4.12
