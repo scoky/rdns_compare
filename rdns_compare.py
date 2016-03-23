@@ -222,9 +222,9 @@ class Probe(object):
     def close(self):
         if self._running:
             self._running = False
+            self._thread.join()
             for sock in self._socks:
                 sock.close()
-            self._thread.join()
 
     def send(self, dgram, addr, callback, data):
         key = self._key(dgram, addr)
@@ -235,10 +235,9 @@ class Probe(object):
                 self._ipv4_sock.sendto(dgram.pack(), addr)
             elif self._ipv6_sock and self.is_valid_ipv6_address(addr[0]):
                 self._ipv6_sock.sendto(dgram.pack(), addr)
-        except socker.error:
+        except socket.error:
             # This can happen for reasons including:
             # The interface supports IPv6 but doesn't actually have any routes
-            # The socket has been closed already. Could lock, but probably not worth putting a socket call in lock
             pass
 
 class Input(object):
