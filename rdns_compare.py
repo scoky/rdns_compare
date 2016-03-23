@@ -69,7 +69,7 @@ class Recursive(object):
     def _write_resp(self, dgram, rtime, ttype, csv):
         if csv:
             print >>csv, '%s,%s,%s,%s,%s,%.3f,%s,%d,%d,%s' % (self.service.name, self.address, str(dgram.q.qname), \
-                dl.QTYPE[dgram.q.qtype], ttype, rtime, dl.RCODE[dgram.header.rcode], len(dgram.rr), dgram.a.ttl, \
+                dl.QTYPE[dgram.q.qtype], ttype, rtime * 1000, dl.RCODE[dgram.header.rcode], len(dgram.rr), dgram.a.ttl, \
                 '|'.join([str(r.rdata) for r in dgram.rr]))
 
     def _compute(self, times):
