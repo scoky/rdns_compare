@@ -10,9 +10,16 @@ import urllib2
 import argparse
 import threading
 import traceback
-import dnslib as dl
-import dns.resolver
 from collections import defaultdict,namedtuple
+
+try:
+    import dns.rcode as dc
+    import dns.message as dm
+    import dns.resolver as dr
+    import dns.rdatatype as dt
+except ImportError:
+    print >>sys.stderr, 'Could not load the third party dependency "dnspython"'
+    sys.exit()
 
 class Service(object):
     def __init__(self, name):
@@ -68,9 +75,16 @@ class Recursive(object):
 
     def _write_resp(self, dgram, rtime, ttype, csv):
         if csv:
-            print >>csv, '%s,%s,%s,%s,%s,%.3f,%s,%d,%d,%s' % (self.service.name, self.address, str(dgram.q.qname), \
-                dl.QTYPE[dgram.q.qtype], ttype, rtime * 1000, dl.RCODE[dgram.header.rcode], len(dgram.rr), dgram.a.ttl, \
-                '|'.join([str(r.rdata) for r in dgram.rr]))
+            print >>csv, '%s,%s,%s,%s,%s,%.3f,%s,%d,%d,%s' % (self.service.name, self.address, \
+                str(dgram.question[0].name), dt.to_text(dgram.question[0].rdtype), ttype, \
+                rtime * 1000, dc.to_text(dgram.rcode()), len(dgram.answer), dgram.answer[0].ttl, \
+                '|'.join([str(rd) for rd in self._get_rdata(dgram)]))
+
+    def _get_rdata(self, dgram):
+        try:
+            return dgram.find_rrset(dgram.answer, dgram.question[0].name, dgram.question[0].rdclass, dgram.question[0].rdtype)
+        except KeyError:
+            return []
 
     def _compute(self, times):
         """ Compute statistics from all of the timing data collected """
@@ -98,25 +112,29 @@ class Recursive(object):
         # Keep track of the minimum resolution time
         self._min_time = min(self._min_time, rtime)
         # See if we actually got an answer
-        self.rcodes[dgram.header.rcode] += 1
+        self.rcodes[dgram.rcode()] += 1
         # Test if the answers provided are within the sane answers
-        for record in dgram.rr:
-            if str(record.rdata) not in answers:
+        found = False
+        for rdata in self._get_rdata(dgram):
+            if str(rdata) not in answers:
                 self.sane = False
-                print >>sys.stderr, '%s may be returning an incorrect response for %s' % (self.address, dgram.q)
+                print >>sys.stderr, '%s may be returning an incorrect response for %s' % (self.address, dgram.question[0])
                 break
+            found = True
+        if not found:
+            print >>sys.stderr, '%s did not return an answer for %s' % (self.address, dgram.question[0])
 
     def resp_popular_1(self, dgram, data, rtime):
         csv,probe = data
         # Keep track of the minimum resolution time
         self._min_time = min(self._min_time, rtime)
         # See if we actually got an answer
-        self.rcodes[dgram.header.rcode] += 1
+        self.rcodes[dgram.rcode()] += 1
         # If got an answer, keep track of time
-        if dgram.header.rcode == dl.RCODE.NOERROR:
+        if dgram.rcode() == dc.NOERROR:
             self.clean_cache.append(rtime)
         # Send follow up query
-        query = dl.DNSRecord.question(dgram.q.qname)
+        query = dm.make_query(dgram.question[0].name, dgram.question[0].rdtype, dgram.question[0].rdclass)
         probe.send(query, (self.address, 53), self.resp_popular_2, csv)
         self._int_queries += 1
         self._write_resp(dgram, rtime, 'clean', csv)
@@ -126,10 +144,10 @@ class Recursive(object):
         # Keep track of the minimum resolution time
         self._min_time = min(self._min_time, rtime)
         # See if we actually got an answer
-        self.rcodes[dgram.header.rcode] += 1
+        self.rcodes[dgram.rcode()] += 1
         # If got an answer AND it looks like it came from cache, keep track of time
         # A response looks like it came from cache if the TTL ends with a digit other than '0'
-        if dgram.header.rcode == dl.RCODE.NOERROR and len(dgram.rr) > 0 and dgram.rr[0].ttl % 10 != 0:
+        if dgram.rcode() == dc.NOERROR and len(dgram.answer) > 0 and dgram.answer[0].ttl % 10 != 0:
             self.prewarm_cache.append(rtime)
         self._write_resp(dgram, rtime, 'prewarm', csv)
 
@@ -198,7 +216,7 @@ class Probe(object):
                 etime = time.time() # Response is wait, stop the clock
                 for sock in read:
                     dgram, addr = sock.recvfrom(4096)
-                    dgram = dl.DNSRecord.parse(dgram)
+                    dgram = dm.from_wire(dgram)
                     # IPv6 will return additional details not needed for lookup
                     addr = (addr[0], addr[1])
 
@@ -216,7 +234,7 @@ class Probe(object):
         self.running = False
 
     def _key(self, dgram, addr):
-        return (dgram.header.id, str(dgram.q.qname), addr)
+        return (dgram.id, str(dgram.question[0].name), addr)
 
     def close(self):
         if self._running:
@@ -227,7 +245,7 @@ class Probe(object):
 
     def send(self, dgram, addr, callback, data):
         key = self._key(dgram, addr)
-        dgram = dgram.pack()
+        dgram = dgram.to_wire()
         if self._ipv4_sock and self.is_valid_ipv4_address(addr[0]):
             sock = self._ipv4_sock
         elif self._ipv6_sock and self.is_valid_ipv6_address(addr[0]):
@@ -302,7 +320,7 @@ def main(bind, source, output, csv, progress):
             output.flush()
         for service in source.recursives:
             for recursive in service.recursives:
-                query = dl.DNSRecord.question(sanity.hostname)
+                query = dm.make_query(sanity.hostname, dt.A)
                 probe.send(query, (recursive.address, 53), recursive.resp_sanity_1, (csv, sanity.addresses))
                 recursive.new_query()
                 time.sleep(0.01)
@@ -316,7 +334,7 @@ def main(bind, source, output, csv, progress):
             output.flush()
         for service in source.recursives:
             for recursive in service.recursives:
-                query = dl.DNSRecord.question(popular)
+                query = dm.make_query(popular, dt.A)
                 probe.send(query, (recursive.address, 53), recursive.resp_popular_1, (csv, probe))
                 recursive.new_query()
                 time.sleep(0.01)
@@ -332,7 +350,7 @@ def main(bind, source, output, csv, progress):
     rdns = []
     for service in source.recursives:
         for recursive in service.recursives:
-            if recursive.rcodes[dl.RCODE.NOERROR] > 0:
+            if recursive.rcodes[dc.NOERROR] > 0:
                 rdns.append(recursive)
             else:
                 print >>sys.stderr, 'Received no answers from %s, dropping from consideration.' % (recursive.address)
@@ -398,7 +416,7 @@ if __name__ == "__main__":
         source.recursives.append(service)
     if args.inuse:
         service = Service('inuse')
-        for nameserver in dns.resolver.get_default_resolver().nameservers:
+        for nameserver in dr.get_default_resolver().nameservers:
             service.recursives.append(Recursive(nameserver, service))
         source.recursives.append(service)
     source.popular = source.popular[:args.names]
