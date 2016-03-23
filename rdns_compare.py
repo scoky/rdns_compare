@@ -20,16 +20,23 @@ class Service(object):
         self.recursives = []
 
 class Recursive(object):
+    Stats = namedtuple('Stats', ['mean', 'sd', 'sd_tail_mean', 'sd_tail_median', 'median', 'md', 'md_tail_mean', 'md_tail_median'])
+
     def __init__(self, address, service):
         self.address = address
         self.service = service
         self.rcodes = defaultdict(int)
         self._int_queries = self._ext_queries = 0
         self.sane = True
-        self.min_time = float('inf')
+        self._min_time = float('inf')
         self.clean_cache = []
         self.prewarm_cache = []
-    
+        self._clean_cache_stats = self._prewarm_cache_stats = None
+
+    @property
+    def min_time(self):
+        return self._min_time * 1000 # Convert from seconds to milliseconds
+
     @property
     def responses(self):
         return sum(self.rcodes.itervalues())
@@ -40,7 +47,23 @@ class Recursive(object):
             just keep track of the ones sent per thread separately. """
         return self._int_queries + self._ext_queries
 
-    def incQueries(self):
+    @property
+    def loss(self):
+        return float(self.responses) / self.queries if self.queries > 0 else 0
+
+    @property
+    def clean_stats(self):
+        if not self._clean_cache_stats:
+            self._clean_cache_stats = self._compute(self.clean_cache)
+        return self._clean_cache_stats
+
+    @property
+    def prewarm_stats(self):
+        if not self._prewarm_cache_stats:
+            self._prewarm_cache_stats = self._compute(self.prewarm_cache)
+        return self._prewarm_cache_stats
+
+    def new_query(self):
         self._ext_queries += 1
 
     def _write_resp(self, dgram, rtime, ttype, csv):
@@ -49,54 +72,31 @@ class Recursive(object):
                 dl.QTYPE[dgram.q.qtype], ttype, rtime, dl.RCODE[dgram.header.rcode], len(dgram.rr), dgram.a.ttl, \
                 '|'.join([str(r.rdata) for r in dgram.rr]))
 
-    def compute(self):
+    def _compute(self, times):
         """ Compute statistics from all of the timing data collected """
-        if len(self.clean_cache) > 0:
-            self.clean_cache_median = numpy.median(self.clean_cache)
-            self.clean_cache_mean = numpy.mean(self.clean_cache)
-            self.clean_cache_sd = numpy.std(self.clean_cache)
-            self.clean_cache_md = numpy.median([abs(v - self.clean_cache_median) for v in self.clean_cache])
-            
-            tail = [v for v in self.clean_cache if v > self.clean_cache_mean + self.clean_cache_sd]
-            if len(tail) > 0:
-                self.clean_cache_tail_sd = numpy.mean(tail)
-            else:
-                self.clean_cache_tail_sd = float('inf')
-                
-            tail = [v for v in self.clean_cache if v > self.clean_cache_median + self.clean_cache_md]
-            if len(tail) > 0:
-                self.clean_cache_tail_md = numpy.mean(tail)
-            else:
-                self.clean_cache_tail_md = float('inf')
-        else:
-            self.clean_cache_median = self.clean_cache_mean = self.clean_cache_sd = self.clean_cache_md = \
-                self.clean_cache_tail_sd = self.clean_cache_tail_md = float('inf')
+        median = mean = sd = md = sd_tail_median = sd_tail_mean = md_tail_median = md_tail_mean = float('inf')
+        times = [t * 1000 for t in times] # Convert from seconds to milliseconds
+        if len(times) > 0:
+            mean = numpy.mean(times)
+            sd = numpy.std(times)
 
-        if len(self.prewarm_cache) > 0:
-            self.prewarm_cache_median = numpy.median(self.prewarm_cache)
-            self.prewarm_cache_mean = numpy.mean(self.prewarm_cache)
-            self.prewarm_cache_sd = numpy.std(self.prewarm_cache)
-            self.prewarm_cache_md = numpy.median([abs(v - self.prewarm_cache_median) for v in self.prewarm_cache])
-            
-            tail = [v for v in self.prewarm_cache if v > self.prewarm_cache_mean + self.prewarm_cache_sd]
+            tail = [v for v in times if v > mean + sd]
             if len(tail) > 0:
-                self.prewarm_cache_tail_sd = numpy.mean(tail)
-            else:
-                self.prewarm_cache_tail_sd = float('inf')
-                
-            tail = [v for v in self.prewarm_cache if v > self.prewarm_cache_median + self.prewarm_cache_md]
+                sd_tail_mean = numpy.mean(tail)
+                sd_tail_median = numpy.median(tail)
+
+            median = numpy.median(times)
+            md = numpy.median([abs(v - median) for v in times])
+            tail = [v for v in times if v > median + md]
             if len(tail) > 0:
-                self.prewarm_cache_tail_md = numpy.mean(tail)
-            else:
-                self.prearm_cache_tail_md = float('inf')
-        else:
-            self.prewarm_cache_median = self.prewarm_cache_mean = self.prewarm_cache_sd = \
-                self.prewarm_cache_md = self.prewarm_cache_tail_sd = self.prewarm_cache_tail_md = float('inf')
+                md_tail_mean = numpy.mean(tail)
+                md_tail_median = numpy.median(tail)
+        return Recursive.Stats(mean, sd, sd_tail_mean, sd_tail_median, median, md, md_tail_mean, md_tail_median)
 
     def resp_sanity_1(self, dgram, data, rtime):
         csv,answers = data
         # Keep track of the minimum resolution time
-        self.min_time = min(self.min_time, rtime)
+        self._min_time = min(self._min_time, rtime)
         # See if we actually got an answer
         self.rcodes[dgram.header.rcode] += 1
         # Test if the answers provided are within the sane answers
@@ -105,12 +105,11 @@ class Recursive(object):
                 self.sane = False
                 print >>sys.stderr, '%s may be returning an incorrect response for %s' % (self.address, dgram.q)
                 break
-        #self._write_resp(dgram, rtime, csv) # Do NOT write sanity checks to output
 
     def resp_popular_1(self, dgram, data, rtime):
         csv,probe = data
         # Keep track of the minimum resolution time
-        self.min_time = min(self.min_time, rtime)
+        self._min_time = min(self._min_time, rtime)
         # See if we actually got an answer
         self.rcodes[dgram.header.rcode] += 1
         # If got an answer, keep track of time
@@ -125,7 +124,7 @@ class Recursive(object):
     def resp_popular_2(self, dgram, data, rtime):
         csv = data
         # Keep track of the minimum resolution time
-        self.min_time = min(self.min_time, rtime)
+        self._min_time = min(self._min_time, rtime)
         # See if we actually got an answer
         self.rcodes[dgram.header.rcode] += 1
         # If got an answer AND it looks like it came from cache, keep track of time
@@ -162,7 +161,7 @@ class Probe(object):
         self._lock = threading.Lock()
         self._callbacks = {}
         self._running = False
-        
+
     def is_valid_ipv4_address(self, address):
         if address == '':
             return True
@@ -196,13 +195,13 @@ class Probe(object):
         while self._running:
             try:
                 read, _, _ = select.select(self._socks, [], [], 1)
+                etime = time.time() # Response is wait, stop the clock
                 for sock in read:
                     dgram, addr = sock.recvfrom(4096)
                     dgram = dl.DNSRecord.parse(dgram)
-                    etime = time.time()
                     # IPv6 will return additional details not needed for lookup
                     addr = (addr[0], addr[1])
-                    
+
                     key = self._key(dgram, addr)
                     with self._lock:
                         callback, data, stime = self._callbacks[key]
@@ -215,7 +214,7 @@ class Probe(object):
             except Exception as e:
                 print >>sys.stderr, 'Exception %s: %s' % (e, traceback.format_exc())
         self.running = False
-        
+
     def _key(self, dgram, addr):
         return (dgram.header.id, str(dgram.q.qname), addr)
 
@@ -228,13 +227,15 @@ class Probe(object):
 
     def send(self, dgram, addr, callback, data):
         key = self._key(dgram, addr)
+        dgram = dgram.pack()
+        if self._ipv4_sock and self.is_valid_ipv4_address(addr[0]):
+            sock = self._ipv4_sock
+        elif self._ipv6_sock and self.is_valid_ipv6_address(addr[0]):
+            sock = self._ipv6_sock
         with self._lock:
             self._callbacks[key] = (callback, data, time.time())
         try:
-            if self._ipv4_sock and self.is_valid_ipv4_address(addr[0]):
-                self._ipv4_sock.sendto(dgram.pack(), addr)
-            elif self._ipv6_sock and self.is_valid_ipv6_address(addr[0]):
-                self._ipv6_sock.sendto(dgram.pack(), addr)
+            sock.sendto(dgram, addr)
         except socket.error:
             # This can happen for reasons including:
             # The interface supports IPv6 but doesn't actually have any routes
@@ -268,7 +269,7 @@ class Input(object):
             for value in values[1:]:
                 service.recursives.append(Recursive(value, service))
             self.recursives.append(service)
-            
+
     def filter_comments(self, src):
         for line in src:
             line = line.strip()
@@ -277,20 +278,20 @@ class Input(object):
             yield line
 
 def main(bind, source, output, csv, progress):
-    """ 
+    """
         Run the tests.
         There are three stages:
         1) sanity check: confirm that the resolvers will actually answer queries
             and that the answers look legitimate.
         2) query for each name once to test response time with cache in 'real' state.
             Repeat query a second time to test response time with prewarmed cache.
-        3) Compute statistics once all results fetched. 
+        3) Compute statistics once all results fetched.
     """
     # Output detailed results to a csv file
     if csv:
         print >>csv, ','.join(('Provider', 'IP', 'Hostname', 'Type', 'Test', 'Duration', \
             'RCode', 'Num_Answers', 'TTL', 'Responses'))
-    
+
     probe = Probe(bind)
     probe.run()
 
@@ -303,7 +304,7 @@ def main(bind, source, output, csv, progress):
             for recursive in service.recursives:
                 query = dl.DNSRecord.question(sanity.hostname)
                 probe.send(query, (recursive.address, 53), recursive.resp_sanity_1, (csv, sanity.addresses))
-                recursive.incQueries()
+                recursive.new_query()
                 time.sleep(0.01)
         time.sleep(0.1)
     time.sleep(1)
@@ -317,26 +318,24 @@ def main(bind, source, output, csv, progress):
             for recursive in service.recursives:
                 query = dl.DNSRecord.question(popular)
                 probe.send(query, (recursive.address, 53), recursive.resp_popular_1, (csv, probe))
-                recursive.incQueries()
+                recursive.new_query()
                 time.sleep(0.01)
         time.sleep(0.1)
     time.sleep(2)
-    
+
     probe.close()
     if progress:
         output.write('\r')
         output.flush()
 
-    # Compute stats
+    # Ignore resolvers that we never received responses from
     rdns = []
     for service in source.recursives:
         for recursive in service.recursives:
             if recursive.rcodes[dl.RCODE.NOERROR] > 0:
-                recursive.compute()
                 rdns.append(recursive)
             else:
                 print >>sys.stderr, 'Received no answers from %s, dropping from consideration.' % (recursive.address)
-
     if len(rdns) == 0:
         print >>output, 'No RDNS to consider!'
         return
@@ -346,10 +345,10 @@ def main(bind, source, output, csv, progress):
     lines.append(['IP_Address', 'Provider', 'Mean', 'Median', 'SD', 'MD', 'Tail', 'Prewarm', 'Minimum', ''])
     lengths = [len(lines[0][i]) for i in range(len(lines[0]))]
 
-    typical = sorted(rdns, key = lambda r: r.clean_cache_median)
-    tail = sorted(rdns, key = lambda r: r.clean_cache_tail_md)[0]
+    typical = sorted(rdns, key = lambda r: r.clean_stats.median)
+    tail = sorted(rdns, key = lambda r: r.clean_stats.md_tail_mean)[0]
     shortest = sorted(rdns, key = lambda r: r.min_time)[0]
-    prewarm = sorted(rdns, key = lambda r: r.prewarm_cache_median)[0]
+    prewarm = sorted(rdns, key = lambda r: r.prewarm_stats.median)[0]
     for r in typical:
         postfix = []
         if r == typical[0]:
@@ -366,14 +365,14 @@ def main(bind, source, output, csv, progress):
             postfix = ''
 
         line = [r.address, r.service.name]
-        line.extend(map(lambda v: format(v, '.3f'), [r.clean_cache_mean, r.clean_cache_median, r.clean_cache_sd, \
-            r.clean_cache_md, r.clean_cache_tail_md, r.prewarm_cache_median, r.min_time]))
+        line.extend(map(lambda v: format(v, '.3f'), [r.clean_stats.mean, r.clean_stats.median, r.clean_stats.sd, \
+            r.clean_stats.md, r.clean_stats.md_tail_median, r.prewarm_stats.median, r.min_time]))
         line.append(postfix)
         lines.append(line)
         lengths = [max(lengths[i], len(line[i])) for i in range(len(lengths))]
-        
+
     for line in lines:
-        print >>output, '  '.join(['{:<{width}}'.format(v, width = w) for v,w in zip(line,lengths)]).rstrip()
+        print >>output, '  '.join(['{:>{width}}'.format(v, width = w) for v,w in zip(line,lengths)]).rstrip()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description='Compare resolution performance of RDNS')
@@ -391,7 +390,7 @@ if __name__ == "__main__":
 
     hostname,port = args.bind.split(':')
     bind = (hostname, int(port))
-    
+
     source = Input(args.popular, args.sanity, args.recursives)
     for additional in args.additional:
         service = Service(additional)
@@ -405,4 +404,3 @@ if __name__ == "__main__":
     source.popular = source.popular[:args.names]
 
     main(bind, source, args.output, args.csv, args.progress)
-
