@@ -18,8 +18,7 @@ try:
     import dns.resolver as dr
     import dns.rdatatype as dt
 except ImportError:
-    print >>sys.stderr, 'Could not load the third party dependency "dnspython"'
-    sys.exit()
+    sys.exit('Could not load the third party dependency "dnspython"')
 
 class Service(object):
     def __init__(self, name):
