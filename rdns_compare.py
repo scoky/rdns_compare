@@ -2,6 +2,7 @@
 
 import os
 import sys
+import lib
 import time
 import numpy
 import select
