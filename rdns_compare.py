@@ -84,7 +84,8 @@ class Recursive(object):
         if csv:
             print >>csv, '%s,%s,%s,%s,%s,%.3f,%s,%d,%d,%s' % (self.service.name, self.address, \
                 str(dgram.question[0].name), dt.to_text(dgram.question[0].rdtype), ttype, \
-                rtime * 1000, dc.to_text(dgram.rcode()), len(dgram.answer), dgram.answer[0].ttl, \
+                rtime * 1000, dc.to_text(dgram.rcode()), len(dgram.answer), \
+                dgram.answer[0].ttl if len(dgram.answer) > 0 else 0, \
                 '|'.join([str(rd) for rd in self._get_rdata(dgram)]))
 
     def _get_rdata(self, dgram):
@@ -373,8 +374,9 @@ def main(bind, source, output, csv, progress):
 
     # Formating output
     lines = []
-    lines.append(['IP_Address', 'Provider', 'Mean', 'Median', 'SD', 'MD', 'Tail', 'Prewarm', 'Minimum', ''])
-    lengths = [len(lines[0][i]) for i in range(len(lines[0]))]
+    line = ['IP_Address', 'Provider', 'Mean', 'Median', 'SD', 'MD', 'Tail', 'Prewarm', 'Minimum']
+    lines.append((line, ''))
+    lengths = [len(col) for col in line]
 
     typical = sorted(rdns, key = lambda r: r.clean_stats.median)
     tail = sorted(rdns, key = lambda r: r.clean_stats.md_tail_mean)[0]
@@ -398,12 +400,11 @@ def main(bind, source, output, csv, progress):
         line = [r.address, r.service.name]
         line.extend(map(lambda v: format(v, '.3f'), [r.clean_stats.mean, r.clean_stats.median, r.clean_stats.sd, \
             r.clean_stats.md, r.clean_stats.md_tail_median, r.prewarm_stats.median, r.min_time]))
-        line.append(postfix)
-        lines.append(line)
+        lines.append((line,postfix))
         lengths = [max(lengths[i], len(line[i])) for i in range(len(lengths))]
 
-    for line in lines:
-        print >>output, '  '.join(['{:>{width}}'.format(v, width = w) for v,w in zip(line,lengths)]).rstrip()
+    for line,postfix in lines:
+        print >>output, '  '.join(['{:>{width}}'.format(v, width = w) for v,w in zip(line,lengths)]).rstrip(), postfix
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description='Compare resolution performance of RDNS')
