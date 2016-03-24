@@ -14,10 +14,12 @@ from collections import defaultdict,namedtuple
 
 try:
     import dns.rcode as dc
+    import dns.flags as df
     import dns.message as dm
     import dns.resolver as dr
     import dns.rdatatype as dt
 except ImportError:
+    # Got to exit, nothing else we can really do here
     sys.exit('Could not load the third party dependency "dnspython"')
 
 class Service(object):
@@ -41,10 +43,12 @@ class Recursive(object):
 
     @property
     def min_time(self):
+        """ Minimum resolution time in milliseconds """
         return self._min_time * 1000 # Convert from seconds to milliseconds
 
     @property
     def responses(self):
+        """ Total number of query responses received """
         return sum(self.rcodes.itervalues())
 
     @property
@@ -55,21 +59,25 @@ class Recursive(object):
 
     @property
     def loss(self):
-        return float(self.responses) / self.queries if self.queries > 0 else 0
+        """ Loss rate for queries """
+        return float(self.queries - self.responses) / self.queries if self.queries > 0 else 0
 
     @property
     def clean_stats(self):
+        """ Statistics for clean cache queries """
         if not self._clean_cache_stats:
             self._clean_cache_stats = self._compute(self.clean_cache)
         return self._clean_cache_stats
 
     @property
     def prewarm_stats(self):
+        """ Statistics for prewarm cache queries """
         if not self._prewarm_cache_stats:
             self._prewarm_cache_stats = self._compute(self.prewarm_cache)
         return self._prewarm_cache_stats
 
     def new_query(self):
+        """ Sent a new query to the resolver """
         self._ext_queries += 1
 
     def _write_resp(self, dgram, rtime, ttype, csv):
@@ -107,6 +115,7 @@ class Recursive(object):
         return Recursive.Stats(mean, sd, sd_tail_mean, sd_tail_median, median, md, md_tail_mean, md_tail_median)
 
     def resp_sanity_1(self, dgram, data, rtime):
+        """ Callback function for a response to a sanity query """
         csv,answers = data
         # Keep track of the minimum resolution time
         self._min_time = min(self._min_time, rtime)
@@ -124,6 +133,7 @@ class Recursive(object):
             print >>sys.stderr, '%s did not return an answer for %s' % (self.address, dgram.question[0])
 
     def resp_popular_1(self, dgram, data, rtime):
+        """ Callback function for a response to a clean cache query """
         csv,probe = data
         # Keep track of the minimum resolution time
         self._min_time = min(self._min_time, rtime)
@@ -139,6 +149,7 @@ class Recursive(object):
         self._write_resp(dgram, rtime, 'clean', csv)
 
     def resp_popular_2(self, dgram, data, rtime):
+        """ Callback function for a response to a prewarm cache query """
         csv = data
         # Keep track of the minimum resolution time
         self._min_time = min(self._min_time, rtime)
@@ -216,6 +227,9 @@ class Probe(object):
                 for sock in read:
                     dgram, addr = sock.recvfrom(4096)
                     dgram = dm.from_wire(dgram)
+                    # Ignore packets that are not responses
+                    if not dgram.flags & df.QR:
+                        continue
                     # IPv6 will return additional details not needed for lookup
                     addr = (addr[0], addr[1])
 
