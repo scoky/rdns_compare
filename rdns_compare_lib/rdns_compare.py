@@ -107,7 +107,7 @@ class Recursive(object):
             return array[len(array) / 2]
 
     def _sd(self, array, mean):
-        return sqrt(sum(pow(v - mean, 2) for v in array) / len(times))
+        return sqrt(sum(pow(v - mean, 2) for v in array) / len(array))
 
     def _compute(self, times):
         """ Compute statistics from all of the timing data collected """
