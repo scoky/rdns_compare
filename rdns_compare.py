@@ -2,7 +2,6 @@
 
 import os
 import sys
-import lib
 import time
 import select
 import socket
@@ -14,6 +13,8 @@ from math import sqrt
 from collections import defaultdict,namedtuple
 
 try:
+    # Add the submodule to path
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "dnspython"))
     import dns.rcode as dc
     import dns.flags as df
     import dns.message as dm
