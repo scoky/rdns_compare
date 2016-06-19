@@ -1,0 +1,3 @@
+[submodule "dnspython"]
+	path = dnspython
+	url = https://github.com/rthalley/dnspython.git
